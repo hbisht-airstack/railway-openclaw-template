@@ -527,12 +527,13 @@ async function autoOnboard() {
         String(INTERNAL_GATEWAY_PORT),
       ]),
     );
-    // Allow Control UI access without device pairing
+    // Allow Control UI access without device pairing (must use --json for boolean)
     await runCmd(
       OPENCLAW_NODE,
       clawArgs([
         "config",
         "set",
+        "--json",
         "gateway.controlUi.allowInsecureAuth",
         "true",
       ]),
@@ -598,6 +599,38 @@ async function autoOnboard() {
           `[auto-onboard] doctor --fix: exit=${doctor.code} output=${doctor.output.trim()}`,
         );
       }
+    }
+
+    // --- Configure Senpi MCP server ---
+    const senpiToken = process.env.SENPI_AUTH_TOKEN?.trim();
+    if (senpiToken) {
+      console.log("[auto-onboard] Configuring Senpi MCP server...");
+      const mcpUrl = process.env.SENPI_MCP_URL || "https://mcp.dev.senpi.ai/mcp";
+      const senpiCfg = {
+        command: "npx",
+        args: [
+          "mcp-remote",
+          mcpUrl,
+          "--header",
+          `Authorization: Bearer ${senpiToken}`,
+        ],
+        env: {
+          SENPI_AUTH_TOKEN: senpiToken,
+        },
+      };
+      const mcpSet = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "config",
+          "set",
+          "--json",
+          "mcpServers.senpi",
+          JSON.stringify(senpiCfg),
+        ]),
+      );
+      console.log(
+        `[auto-onboard] Senpi MCP config: exit=${mcpSet.code} output=${mcpSet.output.trim()}`,
+      );
     }
 
     // --- Bootstrap and start gateway ---
@@ -1001,10 +1034,10 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
           String(INTERNAL_GATEWAY_PORT),
         ]),
       );
-      // Allow Control UI access without device pairing (fixes error 1008: pairing required)
+      // Allow Control UI access without device pairing (must use --json for boolean)
       await runCmd(
         OPENCLAW_NODE,
-        clawArgs(["config", "set", "gateway.controlUi.allowInsecureAuth", "true"]),
+        clawArgs(["config", "set", "--json", "gateway.controlUi.allowInsecureAuth", "true"]),
       );
 
       const channelsHelp = await runCmd(
@@ -1129,6 +1162,14 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       bootstrapOpenClaw();
       // Apply changes immediately.
       await restartGateway();
+
+      // Send Telegram ready notification (non-blocking)
+      const tgToken = (payload.telegramToken || TELEGRAM_BOT_TOKEN || "").trim();
+      if (tgToken) {
+        sendTelegramReadyMessage(tgToken).catch((err) => {
+          console.error(`[setup] Telegram notification failed: ${err.message}`);
+        });
+      }
     }
 
     return res.status(ok ? 200 : 500).json({
@@ -1272,6 +1313,82 @@ proxy.on("proxyReq", (proxyReq, req, res) => {
 proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
   proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
   debug(`[proxy-ws] WebSocket ${req.url} - injected token: ${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}...`);
+});
+
+// Intercept /openclaw Control UI page and inject the gateway token so the
+// browser-side JS can authenticate its WebSocket connection.
+// (The browser WebSocket API does not support custom headers — the token
+//  must be available to the page's JavaScript.)
+app.get(["/openclaw", "/openclaw/"], async (req, res, next) => {
+  if (!isConfigured()) return next();
+
+  try {
+    await ensureGatewayRunning();
+  } catch {
+    return next();
+  }
+
+  try {
+    const upstream = await fetch(`${GATEWAY_TARGET}${req.path}`, {
+      headers: { Authorization: `Bearer ${OPENCLAW_GATEWAY_TOKEN}` },
+      redirect: "follow",
+    });
+
+    if (!upstream.ok) return next();
+
+    const contentType = upstream.headers.get("content-type") || "";
+    if (!contentType.includes("text/html")) return next();
+
+    let html = await upstream.text();
+
+    // Inject a script that auto-fills the gateway token in the Control UI.
+    // Uses a MutationObserver because the UI renders inputs asynchronously.
+    const autoTokenScript = `
+<script data-auto-token>
+(function(){
+  var TOKEN = ${JSON.stringify(OPENCLAW_GATEWAY_TOKEN)};
+  function fill() {
+    var filled = false;
+    document.querySelectorAll("input").forEach(function(el) {
+      var ph = (el.placeholder || "").toLowerCase();
+      var val = (el.value || "").trim();
+      if (ph.includes("token") || val === "OPENCLAW_GATEWAY_TOKEN" || val === "") {
+        // Only target likely token fields (skip session key, URL, password)
+        var prev = el.previousElementSibling || el.parentElement;
+        var label = prev ? (prev.textContent || "").toLowerCase() : "";
+        if (label.includes("token") || ph.includes("token") || val === "OPENCLAW_GATEWAY_TOKEN") {
+          el.value = TOKEN;
+          el.dispatchEvent(new Event("input", {bubbles:true}));
+          el.dispatchEvent(new Event("change", {bubbles:true}));
+          filled = true;
+        }
+      }
+    });
+    return filled;
+  }
+  // Try immediately, then observe DOM for SPA rendering
+  if (!fill()) {
+    var obs = new MutationObserver(function(){ if(fill()) obs.disconnect(); });
+    obs.observe(document.documentElement, {childList:true, subtree:true});
+    setTimeout(function(){ obs.disconnect(); }, 15000);
+  }
+})();
+</script>`;
+
+    // Inject before </head> or at end of <body>
+    if (html.includes("</head>")) {
+      html = html.replace("</head>", autoTokenScript + "\n</head>");
+    } else if (html.includes("</body>")) {
+      html = html.replace("</body>", autoTokenScript + "\n</body>");
+    } else {
+      html += autoTokenScript;
+    }
+
+    res.type("text/html").send(html);
+  } catch (err) {
+    debug(`[control-ui] Token injection failed: ${err.message}`);
+    return next(); // Fall through to normal proxy
+  }
 });
 
 app.use(async (req, res) => {
