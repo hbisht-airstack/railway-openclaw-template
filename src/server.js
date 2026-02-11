@@ -552,6 +552,7 @@ async function autoOnboard() {
           "[auto-onboard] Telegram not supported by this build, skipping",
         );
       } else {
+        // Write the channel config
         const cfgObj = {
           enabled: true,
           dmPolicy: "open",
@@ -569,13 +570,31 @@ async function autoOnboard() {
             JSON.stringify(cfgObj),
           ]),
         );
-        if (set.code === 0) {
-          console.log("[auto-onboard] Telegram configured");
-        } else {
-          console.error(
-            `[auto-onboard] Telegram config failed: ${set.output}`,
-          );
-        }
+        console.log(
+          `[auto-onboard] Telegram config set: exit=${set.code} output=${set.output.trim()}`,
+        );
+
+        // Also enable the telegram plugin entry (required by some builds)
+        await runCmd(
+          OPENCLAW_NODE,
+          clawArgs([
+            "config",
+            "set",
+            "--json",
+            "plugins.entries.telegram",
+            JSON.stringify({ enabled: true }),
+          ]),
+        );
+
+        // Run doctor --fix to finalize channel enablement
+        console.log("[auto-onboard] Running doctor --fix to finalize config...");
+        const doctor = await runCmd(
+          OPENCLAW_NODE,
+          clawArgs(["doctor", "--fix"]),
+        );
+        console.log(
+          `[auto-onboard] doctor --fix: exit=${doctor.code} output=${doctor.output.trim()}`,
+        );
       }
     }
 
@@ -1018,11 +1037,28 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
               JSON.stringify(cfgObj),
             ]),
           );
+          // Also enable the telegram plugin entry (required by some builds)
+          await runCmd(
+            OPENCLAW_NODE,
+            clawArgs([
+              "config",
+              "set",
+              "--json",
+              "plugins.entries.telegram",
+              JSON.stringify({ enabled: true }),
+            ]),
+          );
+          // Run doctor --fix to finalize channel enablement
+          const doctor = await runCmd(
+            OPENCLAW_NODE,
+            clawArgs(["doctor", "--fix"]),
+          );
           const get = await runCmd(
             OPENCLAW_NODE,
             clawArgs(["config", "get", "channels.telegram"]),
           );
           extra += `\n[telegram config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
+          extra += `\n[telegram doctor] exit=${doctor.code}\n${doctor.output || "(no output)"}`;
           extra += `\n[telegram verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
         }
       }
