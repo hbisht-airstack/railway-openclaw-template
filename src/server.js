@@ -19,6 +19,11 @@ const WORKSPACE_DIR =
   process.env.OPENCLAW_WORKSPACE_DIR?.trim() ||
   path.join(STATE_DIR, "workspace");
 
+// Ensure MCPORTER_CONFIG is set so the gateway and mcporter CLI can find the config.
+if (!process.env.MCPORTER_CONFIG) {
+  process.env.MCPORTER_CONFIG = path.join(STATE_DIR, "config", "mcporter.json");
+}
+
 // Protect /setup with a user-provided password.
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
 
@@ -538,6 +543,17 @@ async function autoOnboard() {
         "true",
       ]),
     );
+    // Trust the wrapper proxy (loopback) so X-Forwarded-For headers are accepted
+    await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "config",
+        "set",
+        "--json",
+        "gateway.trustedProxies",
+        JSON.stringify(["127.0.0.1", "::1"]),
+      ]),
+    );
 
     // --- Configure Telegram channel ---
     if (TELEGRAM_BOT_TOKEN) {
@@ -1009,6 +1025,17 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
         OPENCLAW_NODE,
         clawArgs(["config", "set", "--json", "gateway.controlUi.allowInsecureAuth", "true"]),
       );
+      // Trust the wrapper proxy (loopback) so X-Forwarded-For headers are accepted
+      await runCmd(
+        OPENCLAW_NODE,
+        clawArgs([
+          "config",
+          "set",
+          "--json",
+          "gateway.trustedProxies",
+          JSON.stringify(["127.0.0.1", "::1"]),
+        ]),
+      );
 
       const channelsHelp = await runCmd(
         OPENCLAW_NODE,
@@ -1428,8 +1455,16 @@ server.on("upgrade", async (req, socket, head) => {
     return;
   }
 
-  // Inject auth token via headers option (req.headers modification doesn't work for WS)
-  console.log(`[ws-upgrade] Proxying WebSocket upgrade with token: ${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}...`);
+  // The browser WebSocket API cannot send custom headers, so the gateway
+  // looks for the token as a URL query parameter instead of Authorization header.
+  // Inject the token into the URL so the gateway accepts the connection.
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  if (!url.searchParams.has("token")) {
+    url.searchParams.set("token", OPENCLAW_GATEWAY_TOKEN);
+    req.url = url.pathname + url.search;
+  }
+
+  debug(`[ws-upgrade] Proxying WebSocket upgrade for ${req.url}`);
 
   proxy.ws(req, socket, head, {
     target: GATEWAY_TARGET,
