@@ -43,30 +43,14 @@ function deepMerge(target, patch) {
   return out;
 }
 
-function buildSenpiMcpServerEntry() {
-  const mcpUrl = process.env.SENPI_MCP_URL || "https://mcp.dev.senpi.ai/mcp";
-  const senpiToken = process.env.SENPI_AUTH_TOKEN?.trim() || "";
-  if (!senpiToken) return null;
-
-  return {
-    command: "npx",
-    args: [
-      "mcp-remote",
-      mcpUrl,
-      "--header",
-      `Authorization: Bearer ${senpiToken}`,
-    ],
-    env: {
-      SENPI_AUTH_TOKEN: senpiToken,
-    },
-  };
-}
-
 function patchOpenClawJson() {
   const cfgPath = path.join(STATE_DIR, "openclaw.json");
   if (!exists(cfgPath)) return;
 
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+
+  // Remove any invalid keys that would cause gateway startup to fail.
+  delete cfg.mcpServers;
 
   const patch = {
     agents: {
@@ -83,12 +67,6 @@ function patchOpenClawJson() {
       },
     },
   };
-
-  // Register Senpi MCP server directly in openclaw.json so the agent can use it.
-  const senpiEntry = buildSenpiMcpServerEntry();
-  if (senpiEntry) {
-    patch.mcpServers = { senpi: senpiEntry };
-  }
 
   const merged = deepMerge(cfg, patch);
   fs.writeFileSync(cfgPath, JSON.stringify(merged, null, 2));

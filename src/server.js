@@ -601,39 +601,9 @@ async function autoOnboard() {
       }
     }
 
-    // --- Configure Senpi MCP server ---
-    const senpiToken = process.env.SENPI_AUTH_TOKEN?.trim();
-    if (senpiToken) {
-      console.log("[auto-onboard] Configuring Senpi MCP server...");
-      const mcpUrl = process.env.SENPI_MCP_URL || "https://mcp.dev.senpi.ai/mcp";
-      const senpiCfg = {
-        command: "npx",
-        args: [
-          "mcp-remote",
-          mcpUrl,
-          "--header",
-          `Authorization: Bearer ${senpiToken}`,
-        ],
-        env: {
-          SENPI_AUTH_TOKEN: senpiToken,
-        },
-      };
-      const mcpSet = await runCmd(
-        OPENCLAW_NODE,
-        clawArgs([
-          "config",
-          "set",
-          "--json",
-          "mcpServers.senpi",
-          JSON.stringify(senpiCfg),
-        ]),
-      );
-      console.log(
-        `[auto-onboard] Senpi MCP config: exit=${mcpSet.code} output=${mcpSet.output.trim()}`,
-      );
-    }
-
     // --- Bootstrap and start gateway ---
+    // (Senpi MCP server is configured via mcporter.json in bootstrapOpenClaw(),
+    //  NOT in openclaw.json — the gateway rejects unknown root keys.)
     bootstrapOpenClaw();
     console.log("[auto-onboard] Bootstrap complete");
 
