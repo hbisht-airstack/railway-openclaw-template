@@ -553,9 +553,11 @@ async function autoOnboard() {
         );
       } else {
         // Write the channel config
+        // dmPolicy "open" requires allowFrom ["*"] to pass config validation.
         const cfgObj = {
           enabled: true,
           dmPolicy: "open",
+          allowFrom: ["*"],
           botToken: TELEGRAM_BOT_TOKEN,
           groupPolicy: "allowlist",
           streamMode: "partial",
