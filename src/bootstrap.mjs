@@ -1,22 +1,14 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 const STATE_DIR = process.env.OPENCLAW_STATE_DIR || "/data/.openclaw";
 const WORKSPACE_DIR = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
 
-// Primary config path (pointed to by MCPORTER_CONFIG env var)
+// Config path — MCPORTER_CONFIG is set as a Railway env var so every process
+// in the container (wrapper, gateway, agent, tools) can find it.
 const MCPORTER_PATH =
   process.env.MCPORTER_CONFIG ||
   path.join(STATE_DIR, "config", "mcporter.json");
-
-// All paths where the mcporter skill / CLI might look for config.
-// We write to ALL of them so the agent always finds it.
-const MCPORTER_ALL_PATHS = [
-  MCPORTER_PATH,
-  path.join(WORKSPACE_DIR, "config", "mcporter.json"),
-  path.join(os.homedir(), ".mcporter", "mcporter.json"),
-];
 
 const IMAGE_SKILLS_DIR = "/opt/openclaw-skills";
 const STATE_SKILLS_DIR = path.join(STATE_DIR, "skills");
@@ -84,6 +76,8 @@ function patchOpenClawJson() {
 }
 
 function writeMcporterConfig() {
+  ensureDir(path.dirname(MCPORTER_PATH));
+
   const mcpUrl = process.env.SENPI_MCP_URL || "https://mcp.dev.senpi.ai/mcp";
   const senpiToken = process.env.SENPI_AUTH_TOKEN?.trim() || "";
 
@@ -101,29 +95,25 @@ function writeMcporterConfig() {
     },
   };
 
-  for (const cfgPath of MCPORTER_ALL_PATHS) {
-    ensureDir(path.dirname(cfgPath));
-
-    let config;
-    if (exists(cfgPath)) {
-      // Smart merge: preserve any servers/settings the agent may have added
-      try {
-        config = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-        if (!config.mcpServers || typeof config.mcpServers !== "object") {
-          config.mcpServers = {};
-        }
-      } catch {
-        config = { mcpServers: {}, imports: [] };
+  let config;
+  if (exists(MCPORTER_PATH)) {
+    // Smart merge: preserve any servers/settings the agent may have added
+    try {
+      config = JSON.parse(fs.readFileSync(MCPORTER_PATH, "utf8"));
+      if (!config.mcpServers || typeof config.mcpServers !== "object") {
+        config.mcpServers = {};
       }
-    } else {
+    } catch {
       config = { mcpServers: {}, imports: [] };
     }
-
-    // Upsert the senpi server (update token + URL, keep everything else)
-    config.mcpServers.senpi = senpiEntry;
-
-    fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+  } else {
+    config = { mcpServers: {}, imports: [] };
   }
+
+  // Upsert the senpi server (update token + URL, keep everything else)
+  config.mcpServers.senpi = senpiEntry;
+
+  fs.writeFileSync(MCPORTER_PATH, JSON.stringify(config, null, 2));
 }
 
 export function bootstrapOpenClaw() {
