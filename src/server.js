@@ -97,7 +97,6 @@ const OPENCLAW_NODE = process.env.OPENCLAW_NODE?.trim() || "node";
 // --- Auto-onboarding from environment variables (zero-touch deployment) ---
 // Users set these in Railway Variables instead of using the /setup wizard.
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || "";
-const TELEGRAM_ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID?.trim() || "";
 const AI_PROVIDER = process.env.AI_PROVIDER?.trim()?.toLowerCase() || "";
 const AI_API_KEY = process.env.AI_API_KEY?.trim() || "";
 
@@ -318,25 +317,11 @@ function canAutoOnboard() {
 }
 
 /**
- * Collect chat IDs to notify when the bot is ready.
- *
- * Priority:
- *  1. TELEGRAM_ADMIN_CHAT_ID env var (most reliable — always works)
- *  2. getUpdates to discover chats (only works if user messaged bot AND
- *     no previous gateway run consumed those updates)
- *
+ * Collect chat IDs from pending Telegram updates.
  * MUST be called BEFORE the gateway starts, because the gateway's Telegram
  * channel will start polling getUpdates and Telegram only allows one consumer.
  */
 async function collectTelegramChatIds(botToken) {
-  const chatIds = new Set();
-
-  // 1. Use explicitly configured admin chat ID (always reliable)
-  if (TELEGRAM_ADMIN_CHAT_ID) {
-    chatIds.add(TELEGRAM_ADMIN_CHAT_ID);
-    console.log(`[telegram] Using TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID}`);
-  }
-
   try {
     // Verify the bot token is valid
     const meRes = await fetch(
@@ -345,36 +330,36 @@ async function collectTelegramChatIds(botToken) {
     const me = await meRes.json();
     if (!me.ok) {
       console.error(`[telegram] Invalid bot token: ${me.description}`);
-      return [...chatIds];
+      return [];
     }
     console.log(`[telegram] Bot verified: @${me.result.username}`);
 
-    // 2. Also try getUpdates to discover additional chats
+    // Get recent updates to find chat IDs (before gateway claims the polling)
     const updatesRes = await fetch(
       `https://api.telegram.org/bot${botToken}/getUpdates?limit=100`,
     );
     const updates = await updatesRes.json();
 
-    if (updates.ok && updates.result?.length) {
-      for (const update of updates.result) {
-        const chatId =
-          update.message?.chat?.id || update.my_chat_member?.chat?.id;
-        if (chatId) chatIds.add(chatId);
-      }
+    if (!updates.ok || !updates.result?.length) {
+      console.log(
+        "[telegram] No recent chats found - users can message the bot after deploy",
+      );
+      return [];
     }
+
+    const chatIds = new Set();
+    for (const update of updates.result) {
+      const chatId =
+        update.message?.chat?.id || update.my_chat_member?.chat?.id;
+      if (chatId) chatIds.add(chatId);
+    }
+
+    console.log(`[telegram] Collected ${chatIds.size} chat(s) to notify later`);
+    return [...chatIds];
   } catch (err) {
     console.error(`[telegram] Error collecting chat IDs: ${err.message}`);
+    return [];
   }
-
-  if (chatIds.size === 0) {
-    console.log(
-      "[telegram] No chat IDs found. Set TELEGRAM_ADMIN_CHAT_ID or message the bot before deploying.",
-    );
-  } else {
-    console.log(`[telegram] Will notify ${chatIds.size} chat(s)`);
-  }
-
-  return [...chatIds];
 }
 
 /**
