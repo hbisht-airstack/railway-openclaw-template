@@ -1,18 +1,16 @@
-# Build openclaw from source to avoid npm packaging gaps (some dist files are not shipped).
+# syntax=docker/dockerfile:1
+
+# =============================================================================
+# Stage 1: Build Openclaw from source
+# Runs IN PARALLEL with Stage 2 (Docker BuildKit parallelizes independent stages)
+# =============================================================================
 FROM node:22-bookworm AS openclaw-build
 
-# Dependencies needed for openclaw build
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    curl \
-    python3 \
-    make \
-    g++ \
+    git ca-certificates curl python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
-# Install Bun (openclaw build uses it)
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
@@ -20,46 +18,43 @@ RUN corepack enable
 
 WORKDIR /openclaw
 
-# Pin to a known ref (tag/branch). If it doesn't exist, fall back to main.
 ARG OPENCLAW_GIT_REF=main
 RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
 
-# Patch: relax version requirements for packages that may reference unpublished versions.
-# Apply to all extension package.json files to handle workspace protocol (workspace:*).
+# Patch workspace protocol references in extension package.json files
 RUN set -eux; \
   find ./extensions -name 'package.json' -type f | while read -r f; do \
     sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*">=[^"]+"/"openclaw": "*"/g' "$f"; \
     sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*"workspace:[^"]+"/"openclaw": "*"/g' "$f"; \
   done
 
-RUN pnpm install --no-frozen-lockfile
+# Use cache mount for pnpm store — massively speeds up repeated builds
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --no-frozen-lockfile
+
 RUN pnpm build
+
 ENV OPENCLAW_PREFER_PNPM=1
-RUN pnpm ui:install && pnpm ui:build
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm ui:install && pnpm ui:build
+
+# Extract mcporter skill here (avoids a second git clone in runtime stage)
+RUN mkdir -p /opt/openclaw-skills \
+  && if [ -d skills/mcporter ]; then cp -r skills/mcporter /opt/openclaw-skills/; fi
 
 
-# Runtime image
-FROM node:22-bookworm
-ENV NODE_ENV=production
+# =============================================================================
+# Stage 2: Runtime system dependencies (Homebrew, apt packages)
+# Runs IN PARALLEL with Stage 1
+# =============================================================================
+FROM node:22-bookworm AS runtime-deps
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    build-essential \
-    gcc \
-    g++ \
-    make \
-    procps \
-    file \
-    git \
-    python3 \
-    pkg-config \
-    sudo \
+    ca-certificates curl build-essential procps file git python3 pkg-config sudo \
   && rm -rf /var/lib/apt/lists/*
 
-# Install Homebrew (must run as non-root user)
-# Create a user for Homebrew installation, install it, then make it accessible to all users
+# Install Homebrew (must run as non-root user, then hand ownership to root)
 RUN useradd -m -s /bin/bash linuxbrew \
   && echo 'linuxbrew ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
@@ -68,34 +63,39 @@ RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 
 USER root
 RUN chown -R root:root /home/linuxbrew/.linuxbrew
+
+
+# =============================================================================
+# Stage 3: Final runtime image
+# Depends on both Stage 1 and Stage 2 (starts after both complete)
+# =============================================================================
+FROM runtime-deps
+
+ENV NODE_ENV=production
 ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 
 WORKDIR /app
 
-# Wrapper deps
+# Wrapper deps (cached unless package.json / lockfile change)
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --prod --frozen-lockfile && pnpm store prune
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --prod --frozen-lockfile && pnpm store prune
+
 # Install MCPorter CLI so the mcporter skill can execute it
 RUN npm install -g mcporter mcp-remote
 
-# Vendor mcporter skill from OpenClaw repo into image
-RUN set -eux; \
-  mkdir -p /opt/openclaw-skills; \
-  git clone --depth 1 https://github.com/openclaw/openclaw.git /tmp/openclaw; \
-  cp -r /tmp/openclaw/skills/mcporter /opt/openclaw-skills/; \
-  rm -rf /tmp/openclaw
-
-# Copy built openclaw
+# Copy built openclaw + mcporter skill from build stage (no second git clone)
 COPY --from=openclaw-build /openclaw /openclaw
+COPY --from=openclaw-build /opt/openclaw-skills /opt/openclaw-skills
 
-# Provide a openclaw executable
+# Provide openclaw executable on PATH
 RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"' > /usr/local/bin/openclaw \
   && chmod +x /usr/local/bin/openclaw
 
+# Copy wrapper source (last — changes most often, preserves cache above)
 COPY src ./src
 
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "src/server.js"]
-#CMD ["bash", "-lc", "node src/bootstrap.js && node src/server.js"]
