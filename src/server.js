@@ -1249,6 +1249,94 @@ app.post("/setup/api/pairing/approve", requireSetupAuth, async (req, res) => {
     .json({ ok: r.code === 0, output: r.output });
 });
 
+// --- Update Senpi auth token at runtime (callable by the agent via curl) ---
+// Localhost-only: no auth required since only processes inside the container can reach it.
+app.post("/setup/api/senpi-token", async (req, res) => {
+  // Restrict to localhost — agent/gateway run in the same container.
+  const remoteIp = req.ip || req.socket?.remoteAddress || "";
+  const isLocal =
+    remoteIp === "127.0.0.1" ||
+    remoteIp === "::1" ||
+    remoteIp === "::ffff:127.0.0.1";
+  if (!isLocal) {
+    return res.status(403).json({ ok: false, error: "Localhost only" });
+  }
+
+  const { token } = req.body || {};
+  if (!token || typeof token !== "string" || !token.trim()) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "Missing or empty token" });
+  }
+
+  const newToken = token.trim();
+
+  try {
+    // 1. Update process.env so future bootstrapOpenClaw() calls use the new token
+    process.env.SENPI_AUTH_TOKEN = newToken;
+
+    // 2. Update mcporter.json directly
+    const mcporterPath =
+      process.env.MCPORTER_CONFIG ||
+      path.join(STATE_DIR, "config", "mcporter.json");
+
+    let config;
+    try {
+      config = JSON.parse(fs.readFileSync(mcporterPath, "utf8"));
+    } catch {
+      config = { mcpServers: {}, imports: [] };
+    }
+    if (!config.mcpServers) config.mcpServers = {};
+
+    if (
+      config.mcpServers.senpi &&
+      typeof config.mcpServers.senpi === "object"
+    ) {
+      // Update token in existing entry
+      if (!config.mcpServers.senpi.env) config.mcpServers.senpi.env = {};
+      config.mcpServers.senpi.env.SENPI_AUTH_TOKEN = newToken;
+    } else {
+      // Create fresh entry
+      const mcpUrl =
+        process.env.SENPI_MCP_URL || "https://mcp.dev.senpi.ai/mcp";
+      config.mcpServers.senpi = {
+        command: "npx",
+        args: [
+          "mcp-remote",
+          mcpUrl,
+          "--header",
+          "Authorization: Bearer ${SENPI_AUTH_TOKEN}",
+        ],
+        env: { SENPI_AUTH_TOKEN: newToken },
+      };
+    }
+
+    fs.writeFileSync(mcporterPath, JSON.stringify(config, null, 2));
+    console.log("[senpi-token] Updated mcporter.json with new token");
+
+    // 3. Kill stale mcp-remote processes so mcporter respawns them with the new token
+    try {
+      const kill = await runCmd("pkill", ["-f", "mcp-remote"]);
+      console.log(
+        `[senpi-token] pkill mcp-remote: exit=${kill.code}`,
+      );
+    } catch {
+      // pkill returns exit=1 if no processes matched — that's fine
+    }
+
+    return res.json({
+      ok: true,
+      message:
+        "Token updated. mcp-remote processes killed — next MCP call will use the new token.",
+    });
+  } catch (err) {
+    console.error(`[senpi-token] Error: ${err}`);
+    return res
+      .status(500)
+      .json({ ok: false, error: String(err) });
+  }
+});
+
 app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
   // Minimal reset: delete the config file so /setup can rerun.
   // Keep credentials/sessions/workspace by default.

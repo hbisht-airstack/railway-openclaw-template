@@ -120,6 +120,14 @@ export function bootstrapOpenClaw() {
   ensureDir(STATE_DIR);
   ensureDir(WORKSPACE_DIR);
 
+  // Create directories/files the agent's tools expect in the workspace.
+  ensureDir(path.join(WORKSPACE_DIR, "memory"));
+  ensureDir(path.join(WORKSPACE_DIR, "config"));
+  const memoryFile = path.join(WORKSPACE_DIR, "MEMORY.md");
+  if (!exists(memoryFile)) {
+    fs.writeFileSync(memoryFile, "# Memory\n\nAgent context across sessions.\n");
+  }
+
   // Copy mcporter skill into persisted state (so OpenClaw loads it naturally)
   ensureDir(STATE_SKILLS_DIR);
   copyDirIfMissing(
