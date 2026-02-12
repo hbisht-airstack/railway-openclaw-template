@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # =============================================================================
 # Stage 1: Build Openclaw from source
 # Runs IN PARALLEL with Stage 2 (Docker BuildKit parallelizes independent stages)
@@ -29,14 +27,11 @@ RUN set -eux; \
   done
 
 # Use cache mount for pnpm store — massively speeds up repeated builds
-RUN --mount=type=cache,id=pnpm-build,target=/root/.local/share/pnpm/store \
-    pnpm install --no-frozen-lockfile
-
+RUN pnpm install --no-frozen-lockfile
 RUN pnpm build
 
 ENV OPENCLAW_PREFER_PNPM=1
-RUN --mount=type=cache,id=pnpm-ui,target=/root/.local/share/pnpm/store \
-    pnpm ui:install && pnpm ui:build
+RUN pnpm ui:install && pnpm ui:build
 
 # Extract mcporter skill here (avoids a second git clone in runtime stage)
 RUN mkdir -p /opt/openclaw-skills \
@@ -79,8 +74,7 @@ WORKDIR /app
 # Wrapper deps (cached unless package.json / lockfile change)
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,id=pnpm-app,target=/root/.local/share/pnpm/store \
-    pnpm install --prod --frozen-lockfile && pnpm store prune
+RUN pnpm install --prod --frozen-lockfile && pnpm store prune
 
 # Install MCPorter CLI so the mcporter skill can execute it
 RUN npm install -g mcporter mcp-remote
