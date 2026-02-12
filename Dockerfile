@@ -96,6 +96,7 @@ RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"'
 COPY src ./src
 
 ENV PORT=8080
+ENV MCPORTER_CONFIG="/data/.openclaw/config/mcporter.json"
 EXPOSE 8080
 CMD ["node", "src/server.js"]
 #CMD ["bash", "-lc", "node src/bootstrap.js && node src/server.js"]
