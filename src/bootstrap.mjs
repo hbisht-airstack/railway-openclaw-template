@@ -1,11 +1,22 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const STATE_DIR = process.env.OPENCLAW_STATE_DIR || "/data/.openclaw";
 const WORKSPACE_DIR = process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace";
+
+// Primary config path (pointed to by MCPORTER_CONFIG env var)
 const MCPORTER_PATH =
   process.env.MCPORTER_CONFIG ||
   path.join(STATE_DIR, "config", "mcporter.json");
+
+// All paths where the mcporter skill / CLI might look for config.
+// We write to ALL of them so the agent always finds it.
+const MCPORTER_ALL_PATHS = [
+  MCPORTER_PATH,
+  path.join(WORKSPACE_DIR, "config", "mcporter.json"),
+  path.join(os.homedir(), ".mcporter", "mcporter.json"),
+];
 
 const IMAGE_SKILLS_DIR = "/opt/openclaw-skills";
 const STATE_SKILLS_DIR = path.join(STATE_DIR, "skills");
@@ -73,31 +84,46 @@ function patchOpenClawJson() {
 }
 
 function writeMcporterConfig() {
-  ensureDir(path.dirname(MCPORTER_PATH));
-
   const mcpUrl = process.env.SENPI_MCP_URL || "https://mcp.dev.senpi.ai/mcp";
   const senpiToken = process.env.SENPI_AUTH_TOKEN?.trim() || "";
 
-  const config = {
-    mcpServers: {
-      senpi: {
-        command: "npx",
-        args: [
-          "mcp-remote",
-          mcpUrl,
-          "--header",
-          "Authorization: Bearer ${SENPI_AUTH_TOKEN}",
-        ],
-        env: {
-          SENPI_AUTH_TOKEN: senpiToken,
-        },
-      },
+  // The senpi server entry we always want present
+  const senpiEntry = {
+    command: "npx",
+    args: [
+      "mcp-remote",
+      mcpUrl,
+      "--header",
+      "Authorization: Bearer ${SENPI_AUTH_TOKEN}",
+    ],
+    env: {
+      SENPI_AUTH_TOKEN: senpiToken,
     },
-    imports: [],
   };
 
-  // Always write so SENPI_AUTH_TOKEN updates are picked up on redeploy.
-  fs.writeFileSync(MCPORTER_PATH, JSON.stringify(config, null, 2));
+  for (const cfgPath of MCPORTER_ALL_PATHS) {
+    ensureDir(path.dirname(cfgPath));
+
+    let config;
+    if (exists(cfgPath)) {
+      // Smart merge: preserve any servers/settings the agent may have added
+      try {
+        config = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+        if (!config.mcpServers || typeof config.mcpServers !== "object") {
+          config.mcpServers = {};
+        }
+      } catch {
+        config = { mcpServers: {}, imports: [] };
+      }
+    } else {
+      config = { mcpServers: {}, imports: [] };
+    }
+
+    // Upsert the senpi server (update token + URL, keep everything else)
+    config.mcpServers.senpi = senpiEntry;
+
+    fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+  }
 }
 
 export function bootstrapOpenClaw() {

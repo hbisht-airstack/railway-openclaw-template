@@ -97,6 +97,7 @@ const OPENCLAW_NODE = process.env.OPENCLAW_NODE?.trim() || "node";
 // --- Auto-onboarding from environment variables (zero-touch deployment) ---
 // Users set these in Railway Variables instead of using the /setup wizard.
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || "";
+const TELEGRAM_ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID?.trim() || "";
 const AI_PROVIDER = process.env.AI_PROVIDER?.trim()?.toLowerCase() || "";
 const AI_API_KEY = process.env.AI_API_KEY?.trim() || "";
 
@@ -317,13 +318,26 @@ function canAutoOnboard() {
 }
 
 /**
- * Send a "Your bot is ready!" message to any Telegram chats that have already
- * messaged the bot (e.g., the user sent /start before deploying).
+ * Collect chat IDs to notify when the bot is ready.
+ *
+ * Priority:
+ *  1. TELEGRAM_ADMIN_CHAT_ID env var (most reliable — always works)
+ *  2. getUpdates to discover chats (only works if user messaged bot AND
+ *     no previous gateway run consumed those updates)
+ *
+ * MUST be called BEFORE the gateway starts, because the gateway's Telegram
+ * channel will start polling getUpdates and Telegram only allows one consumer.
  */
-async function sendTelegramReadyMessage(botToken) {
-  try {
-    console.log("[telegram] Sending ready notification...");
+async function collectTelegramChatIds(botToken) {
+  const chatIds = new Set();
 
+  // 1. Use explicitly configured admin chat ID (always reliable)
+  if (TELEGRAM_ADMIN_CHAT_ID) {
+    chatIds.add(TELEGRAM_ADMIN_CHAT_ID);
+    console.log(`[telegram] Using TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID}`);
+  }
+
+  try {
     // Verify the bot token is valid
     const meRes = await fetch(
       `https://api.telegram.org/bot${botToken}/getMe`,
@@ -331,76 +345,73 @@ async function sendTelegramReadyMessage(botToken) {
     const me = await meRes.json();
     if (!me.ok) {
       console.error(`[telegram] Invalid bot token: ${me.description}`);
-      return;
+      return [...chatIds];
     }
     console.log(`[telegram] Bot verified: @${me.result.username}`);
 
-    // Get recent updates to find chat IDs
+    // 2. Also try getUpdates to discover additional chats
     const updatesRes = await fetch(
       `https://api.telegram.org/bot${botToken}/getUpdates?limit=100`,
     );
     const updates = await updatesRes.json();
 
-    if (!updates.ok || !updates.result?.length) {
-      console.log(
-        "[telegram] No recent chats found - bot is ready but no one to notify yet",
-      );
-      console.log(
-        "[telegram] Users can message the bot to start interacting",
-      );
-      return;
-    }
-
-    // Collect unique chat IDs from all update types
-    const chatIds = new Set();
-    for (const update of updates.result) {
-      const chatId =
-        update.message?.chat?.id || update.my_chat_member?.chat?.id;
-      if (chatId) chatIds.add(chatId);
-    }
-
-    if (chatIds.size === 0) {
-      console.log("[telegram] No chat IDs found in updates");
-      return;
-    }
-
-    console.log(
-      `[telegram] Found ${chatIds.size} chat(s) to notify`,
-    );
-
-    for (const chatId of chatIds) {
-      try {
-        const sendRes = await fetch(
-          `https://api.telegram.org/bot${botToken}/sendMessage`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id: chatId,
-              text: "Your bot is ready! You can start chatting now.",
-            }),
-          },
-        );
-        const sendResult = await sendRes.json();
-        if (sendResult.ok) {
-          console.log(
-            `[telegram] Sent ready message to chat ${chatId}`,
-          );
-        } else {
-          console.log(
-            `[telegram] Failed to send to chat ${chatId}: ${sendResult.description}`,
-          );
-        }
-      } catch (err) {
-        console.log(
-          `[telegram] Error sending to chat ${chatId}: ${err.message}`,
-        );
+    if (updates.ok && updates.result?.length) {
+      for (const update of updates.result) {
+        const chatId =
+          update.message?.chat?.id || update.my_chat_member?.chat?.id;
+        if (chatId) chatIds.add(chatId);
       }
     }
   } catch (err) {
-    console.error(
-      `[telegram] Error sending ready notification: ${err.message}`,
+    console.error(`[telegram] Error collecting chat IDs: ${err.message}`);
+  }
+
+  if (chatIds.size === 0) {
+    console.log(
+      "[telegram] No chat IDs found. Set TELEGRAM_ADMIN_CHAT_ID or message the bot before deploying.",
     );
+  } else {
+    console.log(`[telegram] Will notify ${chatIds.size} chat(s)`);
+  }
+
+  return [...chatIds];
+}
+
+/**
+ * Send "Your bot is ready!" to pre-collected chat IDs.
+ * Uses sendMessage only (no getUpdates) to avoid conflicting with the gateway.
+ */
+async function sendTelegramReadyMessages(botToken, chatIds) {
+  if (!chatIds?.length) return;
+
+  console.log(`[telegram] Sending ready notification to ${chatIds.length} chat(s)...`);
+
+  for (const chatId of chatIds) {
+    try {
+      const sendRes = await fetch(
+        `https://api.telegram.org/bot${botToken}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: "Your bot is ready! You can start chatting now.",
+          }),
+        },
+      );
+      const sendResult = await sendRes.json();
+      if (sendResult.ok) {
+        console.log(`[telegram] Sent ready message to chat ${chatId}`);
+      } else {
+        console.log(
+          `[telegram] Failed to send to chat ${chatId}: ${sendResult.description}`,
+        );
+      }
+    } catch (err) {
+      console.log(
+        `[telegram] Error sending to chat ${chatId}: ${err.message}`,
+      );
+    }
   }
 }
 
@@ -617,6 +628,13 @@ async function autoOnboard() {
       }
     }
 
+    // --- Collect Telegram chat IDs BEFORE gateway starts ---
+    // (Must happen before gateway claims Telegram polling — only one consumer allowed)
+    let telegramChatIds = [];
+    if (TELEGRAM_BOT_TOKEN) {
+      telegramChatIds = await collectTelegramChatIds(TELEGRAM_BOT_TOKEN);
+    }
+
     // --- Bootstrap and start gateway ---
     // (Senpi MCP server is configured via mcporter.json in bootstrapOpenClaw(),
     //  NOT in openclaw.json — the gateway rejects unknown root keys.)
@@ -626,9 +644,9 @@ async function autoOnboard() {
     await restartGateway();
     console.log("[auto-onboard] Gateway started and ready");
 
-    // --- Send Telegram ready notification ---
-    if (TELEGRAM_BOT_TOKEN) {
-      await sendTelegramReadyMessage(TELEGRAM_BOT_TOKEN);
+    // --- Send Telegram ready notification (using pre-collected chat IDs) ---
+    if (TELEGRAM_BOT_TOKEN && telegramChatIds.length > 0) {
+      await sendTelegramReadyMessages(TELEGRAM_BOT_TOKEN, telegramChatIds);
     }
 
     console.log(
@@ -1156,14 +1174,20 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
           extra += `\n[slack verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
         }
       }
+      // Collect Telegram chat IDs BEFORE gateway starts (avoids getUpdates conflict)
+      const tgToken = (payload.telegramToken || TELEGRAM_BOT_TOKEN || "").trim();
+      let tgChatIds = [];
+      if (tgToken) {
+        tgChatIds = await collectTelegramChatIds(tgToken);
+      }
+
       bootstrapOpenClaw();
       // Apply changes immediately.
       await restartGateway();
 
-      // Send Telegram ready notification (non-blocking)
-      const tgToken = (payload.telegramToken || TELEGRAM_BOT_TOKEN || "").trim();
-      if (tgToken) {
-        sendTelegramReadyMessage(tgToken).catch((err) => {
+      // Send Telegram ready notification (non-blocking, using pre-collected IDs)
+      if (tgToken && tgChatIds.length > 0) {
+        sendTelegramReadyMessages(tgToken, tgChatIds).catch((err) => {
           console.error(`[setup] Telegram notification failed: ${err.message}`);
         });
       }
