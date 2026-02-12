@@ -1497,8 +1497,12 @@ const server = app.listen(PORT, () => {
       console.error(`[wrapper] Auto-onboard failed: ${err}`);
     });
   } else if (isConfigured()) {
-    // Already configured from a previous deploy: start gateway immediately.
-    console.log("[wrapper] Already configured, starting gateway...");
+    // Already configured from a previous deploy: run bootstrap to sync
+    // configs (mcporter, workspace patches) then start gateway.
+    console.log("[wrapper] Already configured, syncing configs and starting gateway...");
+    try { bootstrapOpenClaw(); } catch (err) {
+      console.error(`[wrapper] Bootstrap sync error (non-fatal): ${err}`);
+    }
     ensureGatewayRunning().catch((err) => {
       console.error(`[wrapper] Gateway startup failed: ${err}`);
     });
