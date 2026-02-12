@@ -100,30 +100,9 @@ function writeMcporterConfig() {
   fs.writeFileSync(MCPORTER_PATH, JSON.stringify(config, null, 2));
 }
 
-function ensureWorkspaceStructure() {
-  // Create directories and files the agent's tools expect in the workspace.
-  // Without these, tools like `ls memory` fail on first run.
-  const dirs = ["memory", "config"];
-  for (const d of dirs) {
-    ensureDir(path.join(WORKSPACE_DIR, d));
-  }
-
-  // Create MEMORY.md if it doesn't exist (agent reads this for context)
-  const memoryFile = path.join(WORKSPACE_DIR, "MEMORY.md");
-  if (!exists(memoryFile)) {
-    fs.writeFileSync(
-      memoryFile,
-      "# Memory\n\nThis file is used by the agent to persist context across sessions.\n",
-    );
-  }
-}
-
 export function bootstrapOpenClaw() {
   ensureDir(STATE_DIR);
   ensureDir(WORKSPACE_DIR);
-
-  // Create expected workspace directories and files
-  ensureWorkspaceStructure();
 
   // Copy mcporter skill into persisted state (so OpenClaw loads it naturally)
   ensureDir(STATE_SKILLS_DIR);
