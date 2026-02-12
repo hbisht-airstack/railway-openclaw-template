@@ -81,6 +81,20 @@ function writeMcporterConfig() {
   const mcpUrl = process.env.SENPI_MCP_URL || "https://mcp.dev.senpi.ai/mcp";
   const senpiToken = process.env.SENPI_AUTH_TOKEN?.trim() || "";
 
+  // The senpi server entry we always want present
+  const senpiEntry = {
+    command: "npx",
+    args: [
+      "mcp-remote",
+      mcpUrl,
+      "--header",
+      "Authorization: Bearer ${SENPI_AUTH_TOKEN}",
+    ],
+    env: {
+      SENPI_AUTH_TOKEN: senpiToken,
+    },
+  };
+
   let config;
   if (exists(MCPORTER_PATH)) {
     // Smart merge: preserve any servers/settings the agent may have added
@@ -96,58 +110,8 @@ function writeMcporterConfig() {
     config = { mcpServers: {}, imports: [] };
   }
 
-  const existingSenpi =
-    config.mcpServers.senpi && typeof config.mcpServers.senpi === "object"
-      ? config.mcpServers.senpi
-      : {};
-  const existingEnv =
-    existingSenpi.env && typeof existingSenpi.env === "object"
-      ? existingSenpi.env
-      : {};
-  const existingEnvToken =
-    typeof existingEnv.SENPI_AUTH_TOKEN === "string"
-      ? existingEnv.SENPI_AUTH_TOKEN.trim()
-      : "";
-
-  // Parse a previously persisted token from header args (if present).
-  let existingHeaderToken = "";
-  if (Array.isArray(existingSenpi.args)) {
-    for (let i = 0; i < existingSenpi.args.length - 1; i += 1) {
-      if (existingSenpi.args[i] !== "--header") continue;
-      const header = existingSenpi.args[i + 1];
-      if (typeof header !== "string") continue;
-      const match = header.match(/^Authorization:\s*Bearer\s+(.+)$/i);
-      if (match) {
-        existingHeaderToken = match[1].trim();
-        break;
-      }
-    }
-  }
-
-  // Token precedence:
-  // 1) explicit env var from deployment
-  // 2) existing token in mcporter env
-  // 3) existing token in header args
-  // 4) fallback to runtime expansion placeholder
-  const effectiveToken = senpiToken || existingEnvToken || existingHeaderToken;
-  const authHeader = effectiveToken
-    ? `Authorization: Bearer ${effectiveToken}`
-    : "Authorization: Bearer ${SENPI_AUTH_TOKEN}";
-
-  const mergedEnv = { ...existingEnv };
-  if (senpiToken) {
-    mergedEnv.SENPI_AUTH_TOKEN = senpiToken;
-  } else if (!mergedEnv.SENPI_AUTH_TOKEN && effectiveToken) {
-    mergedEnv.SENPI_AUTH_TOKEN = effectiveToken;
-  }
-
-  // Upsert the senpi server while preserving unknown fields.
-  config.mcpServers.senpi = {
-    ...existingSenpi,
-    command: "npx",
-    args: ["mcp-remote", mcpUrl, "--header", authHeader],
-    env: mergedEnv,
-  };
+  // Upsert the senpi server (update token + URL, keep everything else)
+  config.mcpServers.senpi = senpiEntry;
 
   fs.writeFileSync(MCPORTER_PATH, JSON.stringify(config, null, 2));
 }
