@@ -1312,11 +1312,12 @@ proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
   debug(`[proxy-ws] WebSocket ${req.url} - injected token: ${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}...`);
 });
 
-// Intercept /openclaw Control UI page and inject the gateway token so the
-// browser-side JS can authenticate its WebSocket connection.
-// (The browser WebSocket API does not support custom headers — the token
-//  must be available to the page's JavaScript.)
-app.get(["/openclaw", "/openclaw/"], async (req, res, next) => {
+// Intercept Control UI pages and inject the gateway token so the browser-side
+// JS can authenticate its WebSocket connection.
+// The Control UI loads at BOTH "/" and "/openclaw" (confirmed by proxy logs).
+// The browser WebSocket API cannot send custom headers, so the token must be
+// available to the page's JavaScript via localStorage / input auto-fill.
+app.get(["/", "/openclaw", "/openclaw/"], async (req, res, next) => {
   if (!isConfigured()) return next();
 
   try {
@@ -1326,7 +1327,7 @@ app.get(["/openclaw", "/openclaw/"], async (req, res, next) => {
   }
 
   try {
-    const upstream = await fetch(`${GATEWAY_TARGET}${req.path}`, {
+    const upstream = await fetch(`${GATEWAY_TARGET}${req.originalUrl}`, {
       headers: { Authorization: `Bearer ${OPENCLAW_GATEWAY_TOKEN}` },
       redirect: "follow",
     });
@@ -1338,36 +1339,98 @@ app.get(["/openclaw", "/openclaw/"], async (req, res, next) => {
 
     let html = await upstream.text();
 
-    // Inject a script that auto-fills the gateway token in the Control UI.
-    // Uses a MutationObserver because the UI renders inputs asynchronously.
+    // Inject a script that:
+    // 1. Stores the token in localStorage under common key names
+    // 2. Sets a cookie so WebSocket upgrades can carry it
+    // 3. Auto-fills the "Gateway Token" input field (React-compatible)
+    // 4. Optionally auto-clicks "Connect"
     const autoTokenScript = `
 <script data-auto-token>
 (function(){
   var TOKEN = ${JSON.stringify(OPENCLAW_GATEWAY_TOKEN)};
+
+  // 1. Store in localStorage (the Control UI likely reads from here)
+  try {
+    var keys = [
+      "gateway-token", "gatewayToken", "openclaw-token", "token",
+      "oc:gateway-token", "oc:token", "openclaw-gateway-token"
+    ];
+    for (var i = 0; i < keys.length; i++) {
+      localStorage.setItem(keys[i], TOKEN);
+    }
+  } catch(e) {}
+
+  // 2. Set cookies (sent automatically with WebSocket upgrade requests)
+  try {
+    document.cookie = "token=" + TOKEN + "; path=/; SameSite=Lax";
+    document.cookie = "gateway-token=" + TOKEN + "; path=/; SameSite=Lax";
+  } catch(e) {}
+
+  // 3. Auto-fill input fields (React/SPA compatible)
+  var nativeSetter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype, "value"
+  ).set;
+
   function fill() {
+    var inputs = document.querySelectorAll("input");
     var filled = false;
-    document.querySelectorAll("input").forEach(function(el) {
-      var ph = (el.placeholder || "").toLowerCase();
+    for (var j = 0; j < inputs.length; j++) {
+      var el = inputs[j];
+      // Gather context: label text, placeholder, current value
+      var ctx = "";
+      var parent = el.closest("label, [class*=field], [class*=form-group]");
+      if (parent) ctx += " " + parent.textContent.toLowerCase();
+      var prev = el.previousElementSibling;
+      if (prev) ctx += " " + prev.textContent.toLowerCase();
+      ctx += " " + (el.placeholder || "").toLowerCase();
+      ctx += " " + (el.getAttribute("aria-label") || "").toLowerCase();
       var val = (el.value || "").trim();
-      if (ph.includes("token") || val === "OPENCLAW_GATEWAY_TOKEN" || val === "") {
-        // Only target likely token fields (skip session key, URL, password)
-        var prev = el.previousElementSibling || el.parentElement;
-        var label = prev ? (prev.textContent || "").toLowerCase() : "";
-        if (label.includes("token") || ph.includes("token") || val === "OPENCLAW_GATEWAY_TOKEN") {
-          el.value = TOKEN;
-          el.dispatchEvent(new Event("input", {bubbles:true}));
-          el.dispatchEvent(new Event("change", {bubbles:true}));
-          filled = true;
+
+      // Match "Gateway Token" field, skip URL / session / password fields
+      var isTokenField = (
+        (ctx.includes("gateway token") || ctx.includes("token")) &&
+        !ctx.includes("session") && !ctx.includes("url") &&
+        !ctx.includes("password") && !ctx.includes("websocket")
+      );
+      // Also match if the field has the placeholder literal
+      if (val === "OPENCLAW_GATEWAY_TOKEN") isTokenField = true;
+
+      if (isTokenField && val !== TOKEN) {
+        // Use native setter to work with React controlled inputs
+        nativeSetter.call(el, TOKEN);
+        el.dispatchEvent(new Event("input", {bubbles:true}));
+        el.dispatchEvent(new Event("change", {bubbles:true}));
+        filled = true;
+      }
+    }
+    // 4. Auto-click Connect button if found
+    if (filled) {
+      var btns = document.querySelectorAll("button");
+      for (var k = 0; k < btns.length; k++) {
+        if (btns[k].textContent.trim().toLowerCase() === "connect") {
+          setTimeout(function(){ btns[k].click(); }, 500);
+          break;
         }
       }
-    });
+    }
     return filled;
   }
-  // Try immediately, then observe DOM for SPA rendering
-  if (!fill()) {
-    var obs = new MutationObserver(function(){ if(fill()) obs.disconnect(); });
-    obs.observe(document.documentElement, {childList:true, subtree:true});
-    setTimeout(function(){ obs.disconnect(); }, 15000);
+
+  // Try immediately, then observe DOM for SPA async rendering
+  function tryFill() {
+    if (!fill()) {
+      var obs = new MutationObserver(function(){
+        if (fill()) obs.disconnect();
+      });
+      obs.observe(document.documentElement, {childList:true, subtree:true});
+      setTimeout(function(){ obs.disconnect(); }, 20000);
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", tryFill);
+  } else {
+    tryFill();
   }
 })();
 </script>`;
@@ -1383,7 +1446,7 @@ app.get(["/openclaw", "/openclaw/"], async (req, res, next) => {
 
     res.type("text/html").send(html);
   } catch (err) {
-    debug(`[control-ui] Token injection failed: ${err.message}`);
+    console.error(`[control-ui] Token injection failed: ${err.message}`);
     return next(); // Fall through to normal proxy
   }
 });
